@@ -1,0 +1,156 @@
+#
+# Mz7 for macOS: a universal (Apple Silicon and Intel) VST3 and Audio Unit, and the standalone app, ad-hoc
+# signed and zipped with an install script, as a beta.
+#
+# Nothing here goes through Apple. The bundles carry only the free ad-hoc signature Apple
+# Silicon needs before it will run code at all - no Developer ID, no notarization - so a
+# downloaded copy is quarantined, and installer/mac/install.sh is how a user gets past that.
+# installer/mac/READ ME FIRST.txt, in the zip, says so in plain words.
+#
+# Runs on every push to main, as a check that the Mac build still builds, and keeps the zip on
+# the run for two weeks. The release workflow calls it for each tag, after the Windows job has
+# made the release, and it attaches the zip there.
+#
+# Nobody working on this has a Mac, so a compile error is read back through the API rather
+# than from the log: the first forty "error:" lines become annotations, which the check-runs
+# API serves without signing in.
+#
+name: mac
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: "The release to attach the zip to"
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  NAME: Mz7
+  AU_CODE: Mz07            # the plugin code: the Audio Unit's subtype, for auval
+  SIBLINGS: ""        # other repositories CMakeLists.txt expects beside this one
+  JUCE_TAG: "9.0.2"             # the same JUCE as the Windows build
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+
+      - name: JUCE, and anything else, beside the repository
+        run: |
+          git clone --depth 1 --branch "$JUCE_TAG" https://github.com/juce-framework/JUCE ../JUCE
+          for s in $SIBLINGS; do git clone --depth 1 "https://github.com/simozzer/$s" "../$s"; done
+
+      - name: Configure, universal, for macOS 11 and later
+        run: |
+          set -o pipefail
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+                2>&1 | tee configure.log || {
+            grep -E "Error|error" configure.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
+
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --parallel 2>&1 | tee build.log || {
+            grep -E "error:|Error [0-9]" build.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
+
+      - name: The checks, as on Windows
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Universal, and ad-hoc signed
+        run: |
+          art="build/${NAME}_artefacts/Release"
+          for b in "$art/VST3/$NAME.vst3" "$art/AU/$NAME.component" "$art/Standalone/$NAME.app"; do
+            [ -e "$b" ] || continue
+            lipo -archs "$b/Contents/MacOS/$NAME"
+            codesign --force --deep --sign - "$b"
+            codesign --verify --deep --strict "$b"
+          done
+
+      #
+      # Apple's own Audio Unit validator: the check Logic runs before it will list a plugin, so
+      # an AU that fails here would never appear there.
+      #
+      - name: Validate the Audio Unit
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          rm -rf ~/Library/Audio/Plug-Ins/Components/$NAME.component
+          ditto "build/${NAME}_artefacts/Release/AU/$NAME.component" ~/Library/Audio/Plug-Ins/Components/$NAME.component
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 2
+          found=$(auval -a | grep -E " $AU_CODE Smoz" | head -1 || true)
+          if [ -z "$found" ]; then
+            echo "::error::auval does not list $NAME ($AU_CODE Smoz)"
+            auval -a | grep -i smoz || true
+            exit 1
+          fi
+          echo "$found"
+          auval -v $(echo "$found" | awk '{ print $1, $2, $3 }')
+
+      - name: Package, as a beta
+        run: |
+          ver=$(sed -n "s/^project($NAME VERSION \([0-9.]*\).*/\1/p" CMakeLists.txt)
+          pkg="$NAME-$ver-macOS-beta"
+          art="build/${NAME}_artefacts/Release"
+          out="dist/$pkg"
+          mkdir -p "$out"
+
+          for b in "VST3/$NAME.vst3" "AU/$NAME.component" "Standalone/$NAME.app"; do
+            [ -e "$art/$b" ] && ditto "$art/$b" "$out/$(basename "$b")"
+          done
+          cp "installer/mac/READ ME FIRST.txt" installer/mac/install.sh LICENSE README.md "$out/"
+          chmod +x "$out/install.sh"
+
+          # ditto, not zip: bundles hold symlinks and executable bits a plain zip can lose
+          (cd dist && ditto -c -k --keepParent "$pkg" "$pkg.zip")
+          (cd dist && shasum -a 256 "$pkg.zip" | tee "SHA256SUMS-macOS.txt")
+          echo "PKG=$pkg" >> "$GITHUB_ENV"
+
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS-macOS.txt
+          retention-days: 14
+          if-no-files-found: error
+
+      #
+      # The release for the tag is found by listing them all, drafts too: looked up by its tag,
+      # GitHub does not return a draft, and the Windows job has usually just made one. Never
+      # made here - two jobs each making a draft is how a release ends up twice.
+      #
+      - name: Attach to the release
+        if: inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+                 --jq "[.[] | select(.tag_name == \"$TAG\")] | sort_by(.draft) | .[0].id // empty")
+          if [ -z "$id" ]; then echo "::error::no release for $TAG to attach the Mac zip to"; exit 1; fi
+
+          for f in "dist/$PKG.zip" dist/SHA256SUMS-macOS.txt; do
+            name=$(basename "$f")
+            for old in $(gh api "repos/$GITHUB_REPOSITORY/releases/$id/assets" --jq ".[] | select(.name == \"$name\") | .id"); do
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"
+            done
+            curl -sSf -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
+                 --data-binary @"$f" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$id/assets?name=$name" > /dev/null
+            echo "  $name"
+          done

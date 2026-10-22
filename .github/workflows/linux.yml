@@ -1,0 +1,143 @@
+#
+# Mz7 for Linux: the VST3 and the LV2, and the standalone app, for 64-bit x86 PCs on Ubuntu 22.04 and
+# later or another distribution as new, in a .tar.gz with an install script, as a beta.
+#
+# Built on Ubuntu 22.04, the oldest the runners offer, so it runs on that and everything since:
+# a program built against an older glibc runs on newer ones, not the other way round. Building
+# the LV2 loads the plugin itself, to write its description, so a plugin that will not load
+# does not get past the build.
+#
+# Runs on every push to main, as a check that the Linux build still builds, and keeps the
+# archive on the run for two weeks. The release workflow calls it for each tag, after the
+# Windows job has made the release, and it attaches the archive there. Run by hand with a
+# release's tag, it adds the Linux archive to a release made before there was one.
+#
+# A compile error is read back through the API rather than from the log: the first forty
+# "error:" lines become annotations, which the check-runs API serves without signing in.
+#
+name: linux
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "An existing release's tag to attach the Linux archive to (optional)"
+        type: string
+        required: false
+  workflow_call:
+    inputs:
+      tag:
+        description: "The release to attach the archive to"
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  NAME: Mz7
+  SIBLINGS: ""        # other repositories CMakeLists.txt expects beside this one
+  JUCE_TAG: "9.0.2"             # the same JUCE as the Windows build
+  TAG: ${{ inputs.tag || inputs.release }}
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+
+      # What JUCE needs on Linux: ALSA for sound, FreeType and Fontconfig for text, X11 and
+      # its extensions for the window. JACK, curl and WebKit are all off, as JUCE leaves them.
+      - name: The libraries JUCE builds against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++ cmake ninja-build pkg-config \
+            libasound2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxi-dev libxinerama-dev libxrandr-dev libxrender-dev
+
+      - name: JUCE, and anything else, beside the repository
+        run: |
+          git clone --depth 1 --branch "$JUCE_TAG" https://github.com/juce-framework/JUCE ../JUCE
+          for s in $SIBLINGS; do git clone --depth 1 "https://github.com/simozzer/$s" "../$s"; done
+
+      - name: Configure
+        run: |
+          set -o pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release 2>&1 | tee configure.log || {
+            grep -E "Error|error" configure.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
+
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build build --parallel 2>&1 | tee build.log || {
+            grep -E "error:|Error [0-9]" build.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
+
+      - name: The checks, as on Windows
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package, as a beta
+        run: |
+          ver=$(sed -n "s/^project($NAME VERSION \([0-9.]*\).*/\1/p" CMakeLists.txt)
+          pkg="$NAME-$ver-linux-x86_64-beta"
+          art="build/${NAME}_artefacts/Release"
+          out="dist/$pkg"
+          mkdir -p "$out"
+
+          for b in "VST3/$NAME.vst3" "LV2/$NAME.lv2" "Standalone/$NAME"; do
+            [ -e "$art/$b" ] && cp -r "$art/$b" "$out/"
+          done
+          test -d "$out/$NAME.vst3" || { echo "::error::no VST3 was built"; exit 1; }
+          test -d "$out/$NAME.lv2"  || { echo "::error::no LV2 was built"; exit 1; }
+          find "$out" -name "*.so" -exec strip --strip-unneeded {} +
+          [ -f "$out/$NAME" ] && strip "$out/$NAME"
+
+          cp "installer/linux/READ ME FIRST.txt" installer/linux/install.sh LICENSE README.md "$out/"
+          chmod +x "$out/install.sh"
+          find "$out" -type f | sort
+
+          (cd dist && tar -czf "$pkg.tar.gz" "$pkg")
+          (cd dist && sha256sum "$pkg.tar.gz" | tee "SHA256SUMS-linux.txt")
+          echo "PKG=$pkg" >> "$GITHUB_ENV"
+
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG }}
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS-linux.txt
+          retention-days: 14
+          if-no-files-found: error
+
+      #
+      # The release for the tag is found by listing them all, drafts too: looked up by its tag,
+      # GitHub does not return a draft, and the Windows job has usually just made one. Never
+      # made here - two jobs each making a draft is how a release ends up twice.
+      #
+      - name: Attach to the release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+                 --jq "[.[] | select(.tag_name == \"$TAG\")] | sort_by(.draft) | .[0].id // empty")
+          if [ -z "$id" ]; then echo "::error::no release for $TAG to attach the Linux archive to"; exit 1; fi
+
+          for f in "dist/$PKG.tar.gz" dist/SHA256SUMS-linux.txt; do
+            name=$(basename "$f")
+            for old in $(gh api "repos/$GITHUB_REPOSITORY/releases/$id/assets" --jq ".[] | select(.name == \"$name\") | .id"); do
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"
+            done
+            curl -sSf -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
+                 --data-binary @"$f" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$id/assets?name=$name" > /dev/null
+            echo "  $name"
+          done

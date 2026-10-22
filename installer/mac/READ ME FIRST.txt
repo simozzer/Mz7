@@ -1,0 +1,60 @@
+Mz7 for macOS - BETA
+======================
+
+An emulation of the Yamaha DX7 FM synthesizer: a VST3, an Audio
+Unit (for Logic and GarageBand) and a standalone app. Independent - not
+affiliated with Yamaha.
+Free and open source (AGPLv3). Created by Simon Moscrop.
+
+Runs on Apple Silicon and Intel Macs, macOS 11 or later.
+
+This is a beta. It's built on GitHub's Macs and passes Apple's own Audio Unit
+check, but nobody working on it has a Mac to try it on. If something doesn't
+work, please say so on https://github.com/simozzer/Mz7/issues
+
+
+INSTALLING - one command
+------------------------
+
+macOS will refuse to open anything in this download if you double-click it.
+That isn't a fault. Apple only lets through software whose developer has paid
+for an Apple account and sent it to Apple to be checked ("notarization"), and
+this project doesn't. So it's installed from Terminal instead:
+
+  1. Open Terminal (Applications > Utilities > Terminal).
+  2. Type  bash  and a space.
+  3. Drag install.sh from this folder into the Terminal window.
+  4. Press Return.
+
+It copies everything into place inside your own home folder, with no password
+needed, and clears the "downloaded from the internet" flag that would otherwise
+stop your DAW loading the plugin. Then rescan plug-ins in your DAW.
+
+
+INSTALLING BY HAND, if you'd rather
+-----------------------------------
+
+  Mz7.vst3        ->  ~/Library/Audio/Plug-Ins/VST3
+  Mz7.component   ->  ~/Library/Audio/Plug-Ins/Components   (Logic, GarageBand)
+  Mz7.app         ->  /Applications
+
+then, in Terminal, for each one you copied:
+
+  xattr -dr com.apple.quarantine <the file, dragged in>
+
+The other way, without Terminal: try to open it once, then go to System
+Settings > Privacy & Security, scroll down, and click "Open Anyway". That
+works for an app; a plugin is easier with the command above.
+
+
+REMOVING IT
+-----------
+
+Delete what you copied. Nothing else is installed anywhere.
+
+
+MORE
+----
+
+README.md is the manual. The source, the Windows version and every release:
+https://github.com/simozzer/Mz7
