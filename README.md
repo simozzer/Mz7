@@ -86,7 +86,8 @@ instead.
 Download `Mz7-<version>-linux-x86_64-beta.tar.gz` from the
 [releases page](https://github.com/simozzer/Mz7/releases) and unpack it. It holds the VST3,
 an LV2 and the standalone app, for 64-bit x86 PCs on Ubuntu 22.04 or later, or another
-distribution as new. In the unpacked folder:
+distribution as new. For a **Raspberry Pi 5** on 64-bit Raspberry Pi OS (Bookworm or
+later), download `Mz7-<version>-linux-arm64-beta.tar.gz` instead; it installs the same way. In the unpacked folder:
 
     bash install.sh
 
